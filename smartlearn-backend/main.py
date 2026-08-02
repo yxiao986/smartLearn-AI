@@ -19,11 +19,16 @@ class ChatRequest(BaseModel):
 
 app = FastAPI(title="Smartlearn Lite API")
 
-allowed_origins = [
-    origin.strip()
-    for origin in os.getenv("ALLOWED_ORIGINS", "http://localhost:5173").split(",")
-    if origin.strip()
-]
+raw_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173")
+
+if isinstance(raw_origins, str):
+    allowed_origins = [
+        origin.strip().rstrip("/") 
+        for origin in raw_origins.split(",") 
+        if origin.strip()
+    ]
+else:
+    allowed_origins = raw_origins
 
 app.add_middleware(
     CORSMiddleware,
