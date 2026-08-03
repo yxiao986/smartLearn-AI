@@ -10,9 +10,7 @@ export function PdfUploader({ upload, status, onUpload }) {
   }
 
   return (
-    <section>
-      <h2>Upload PDF</h2>
-      <label htmlFor="pdf-input">Select PDF:</label>
+    <div className="pdf-uploader">
       <input
         id="pdf-input"
         type="file"
@@ -24,15 +22,13 @@ export function PdfUploader({ upload, status, onUpload }) {
         onClick={handleUploadClick}
         disabled={!file || status}
       >
-        Upload
+        {status === "Uploading..." ? "Uploading..." : "Upload"}
       </button>
-      {status === "Uploading..." && <p>{status}</p>}
       {upload && (
-        <div>
-          <p>✓ Uploaded: {upload.filename}</p>
-          <p>Pages: {upload.pages} | Characters: {upload.characters}</p>
+        <div className="file-badge">
+          📄 {upload.filename}
         </div>
       )}
-    </section>
+    </div>
   )
 }

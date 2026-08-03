@@ -19,11 +19,16 @@ export async function uploadPDF(file) {
   return response.json()
 }
 
-export async function askQuestion(message) {
+export async function askQuestion(message, currentPage) {
+  const body = { message, chat_id: CHAT_ID }
+  if (currentPage) {
+    body.current_page = currentPage
+  }
+
   const response = await fetch(`${API}/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message, chat_id: CHAT_ID })
+    body: JSON.stringify(body)
   })
 
   if (!response.ok) {

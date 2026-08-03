@@ -3,3 +3,7 @@ venv/
 __pycache__/
 *.pyc
 .vscode/
+artifacts/
+Day3/artifacts/
+*.npy
+*.faiss

@@ -751,11 +751,13 @@ def search_document(
     document: dict,
     top_k: int = 3,
     candidate_pool: int = 60,
-    history: list[dict] | None = None
+    history: list[dict] | None = None,
+    current_page: int = None
 ) -> list[dict]:
   """Retrieve top-k hits from saved document index.
 
   Loads the FAISS index from disk, runs retrieval, returns top-k.
+  If current_page is provided, prioritizes chunks from that page.
 
   Args:
     question: Query text
@@ -763,6 +765,7 @@ def search_document(
     top_k: Number of top results to return
     candidate_pool: Rerank from top-N
     history: Previous turns (unused, for API compatibility)
+    current_page: Current PDF page to prioritize (optional)
 
   Returns:
     List of hits: [{page, chunk_id, text, score}, ...]
@@ -779,7 +782,14 @@ def search_document(
     "chunks": chunks
   }
 
-  return search_bundle(question, bundle, top_k=top_k, candidate_pool=candidate_pool, history=history)
+  hits = search_bundle(question, bundle, top_k=top_k, candidate_pool=candidate_pool, history=history)
+
+  if current_page:
+    page_hits = [h for h in hits if h.get("page") == current_page]
+    other_hits = [h for h in hits if h.get("page") != current_page]
+    hits = page_hits + other_hits
+
+  return hits
 
 
 def split_sentences(text: str) -> list[str]:
@@ -960,12 +970,51 @@ def build_sources(hits: list[dict]) -> list[dict]:
   return sources
 
 
+def build_grounded_user_prompt(
+    question: str,
+    hits: list[dict],
+    history: list[dict] | None = None
+) -> str:
+  """Build a grounded prompt combining question, evidence, and history.
+
+  Constructs an LLM prompt with conversation context and retrieved evidence.
+
+  Args:
+    question: User's current question
+    hits: Retrieved chunks with evidence [{page, chunk_id, text, score}, ...]
+    history: Prior conversation turns (optional) [{question, answer, citations, sources}, ...]
+
+  Returns:
+    Formatted prompt string for LLM consumption
+  """
+  lines = []
+
+  if history:
+    lines.append("## Conversation History")
+    for turn in history[-3:]:
+      lines.append(f"Q: {turn['question']}")
+      lines.append(f"A: {turn['answer'][:200]}...")
+      lines.append("")
+
+  if hits:
+    lines.append("## Retrieved Evidence")
+    for i, hit in enumerate(hits[:3], 1):
+      lines.append(f"[{i}] Page {hit['page']}: {hit['text'][:300]}...")
+      lines.append("")
+
+  lines.append("## Current Question")
+  lines.append(question)
+
+  return "\n".join(lines)
+
+
 def answer_document(
     document: dict,
     question: str,
     top_k: int = 3,
     candidate_pool: int = 60,
-    answer_model: str = "tencent/hy3:free"
+    answer_model: str = "tencent/hy3:free",
+    current_page: int = None
 ) -> dict:
   """Retrieve relevant chunks and optionally call LLM for answer.
 
@@ -975,11 +1024,12 @@ def answer_document(
     top_k: Number of top chunks to retrieve
     candidate_pool: Rerank from top-N
     answer_model: LLM model for answering (used if API key available)
+    current_page: Current PDF page for context (optional)
 
   Returns:
     Dict with answer, citations, and sources
   """
-  hits = search_document(question, document, top_k=top_k, candidate_pool=candidate_pool)
+  hits = search_document(question, document, top_k=top_k, candidate_pool=candidate_pool, current_page=current_page)
 
   if not hits:
     return {
@@ -994,6 +1044,12 @@ def answer_document(
     api_key = os.getenv("OPENROUTER_API_KEY")
   except:
     pass
+
+  import sys
+  print(f"DEBUG: api_key={'SET' if api_key else 'NOT SET'}, current_page={current_page}", file=sys.stderr)
+  print(f"DEBUG: retrieved {len(hits)} hits from search_document", file=sys.stderr)
+  for i, hit in enumerate(hits[:3]):
+    print(f"  [{i}] Page {hit.get('page')}: score={hit.get('score'):.3f}", file=sys.stderr)
 
   if api_key:
     try:
@@ -1039,6 +1095,43 @@ def append_history(document: dict, question: str, result: dict) -> list[dict]:
 
   document["history"].append(turn)
   return document["history"]
+
+
+def answer_chat_turn(
+    document: dict,
+    message: str,
+    top_k: int = 3,
+    candidate_pool: int = 60,
+    answer_model: str = "poolside/laguna-s-2.1:free",
+    current_page: int = None
+) -> dict:
+  """Full RAG turn: retrieve, answer, and update history in one call.
+
+  Orchestrates retrieval, LLM answering, and history tracking.
+
+  Args:
+    document: Prepared document record from prepare_rag_document() with history
+    message: User message/question
+    top_k: Number of top chunks to retrieve
+    candidate_pool: Rerank from top-N
+    answer_model: LLM model for answering
+    current_page: Current PDF page for context (optional)
+
+  Returns:
+    Dict with answer, citations, sources (same shape as answer_document)
+  """
+  result = answer_document(
+    document,
+    message,
+    top_k=top_k,
+    candidate_pool=candidate_pool,
+    answer_model=answer_model,
+    current_page=current_page
+  )
+
+  append_history(document, message, result)
+
+  return result
 
 
 def normalize_for_match(text: str) -> str:

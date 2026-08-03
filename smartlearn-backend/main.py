@@ -1,21 +1,25 @@
 import sys
 from pathlib import Path
+from dotenv import load_dotenv
 
+load_dotenv()
 sys.path.insert(0, str(Path(__file__).parent))
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, status
-from services.pdf import extract_pages
-from pydantic import BaseModel, Field
-import re
-from services.llm import answer_from_pages
-import os
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+import os
+from services import rag
 
-documents = {}
+documents: dict[str, dict] = {}
+UPLOADS_ROOT = Path("smartlearn-backend/uploads")
+UPLOADS_ROOT.mkdir(parents=True, exist_ok=True)
 
 class ChatRequest(BaseModel):
-    chat_id: str = Field(default="day2-demo")
-    message: str = Field(min_length=2, max_length=2000)
+    chat_id: str = Field(..., description="Chat session ID")
+    message: str = Field(..., min_length=1, max_length=2000, description="User message")
+    current_page: int = Field(None, description="Current PDF page for context")
 
 app = FastAPI(title="Smartlearn Lite API")
 
@@ -50,51 +54,89 @@ async def upload(chat_id: str, file: UploadFile = File(...)):
     if not pdf_bytes:
         raise HTTPException(status_code=400, detail="File is empty")
 
+    chat_uploads_dir = UPLOADS_ROOT / chat_id
+    chat_uploads_dir.mkdir(parents=True, exist_ok=True)
+    saved_pdf_path = chat_uploads_dir / (file.filename or "document.pdf")
+    saved_pdf_path.write_bytes(pdf_bytes)
+
     try:
-        pages = extract_pages(pdf_bytes)
+        pages = rag.extract_pages_for_rag(pdf_bytes)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     total_chars = sum(len(page["text"]) for page in pages)
-
     if total_chars == 0:
         raise HTTPException(status_code=422, detail="PDF contains no readable text. OCR is not supported.")
 
-    documents[chat_id] = pages
+    try:
+        document = rag.prepare_rag_document(
+            document_id=chat_id,
+            filename=file.filename,
+            pages=pages,
+            chunk_mode="character_overlap",
+            chunk_size=700,
+            overlap=120,
+            model_name="sentence-transformers/all-MiniLM-L6-v2",
+            batch_size=32,
+            artifact_root="artifacts"
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to prepare RAG document: {str(e)}")
+
+    document["saved_pdf_path"] = str(saved_pdf_path.resolve())
+    documents[chat_id] = document
+
     return {
-        "status": "success",
+        "status": "ok",
         "filename": file.filename,
         "pages": len(pages),
         "characters": total_chars
     }
+
+@app.get("/documents/{chat_id}/file")
+def get_document_file(chat_id: str):
+    if chat_id not in documents:
+        raise HTTPException(status_code=404, detail=f"Chat ID '{chat_id}' not found.")
+
+    document = documents[chat_id]
+    file_path = document.get("saved_pdf_path")
+
+    if not file_path:
+        raise HTTPException(status_code=404, detail="Saved PDF path not found in document record.")
+
+    file_path = Path(file_path)
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Saved PDF file not found on disk.")
+
+    return FileResponse(
+        str(file_path),
+        media_type="application/pdf",
+        headers={"Content-Disposition": "inline"}
+    )
 
 @app.post("/chat")
 async def chat(request: ChatRequest):
     if request.chat_id not in documents:
         raise HTTPException(
             status_code=404,
-            detail="Chat ID not found. Please upload a PDF first using /upload?chat_id=" + request.chat_id
+            detail=f"Chat ID '{request.chat_id}' not found. Please upload a PDF first using POST /upload?chat_id={request.chat_id}"
         )
 
-    pages = documents[request.chat_id]
+    document = documents[request.chat_id]
 
     try:
-        answer = answer_from_pages(pages, request.message)
+        result = rag.answer_chat_turn(
+            document,
+            request.message,
+            top_k=3,
+            candidate_pool=60,
+            answer_model="poolside/laguna-s-2.1:free",
+            current_page=request.current_page
+        )
     except Exception as e:
         raise HTTPException(
-            status_code=502,
-            detail=f"Upstream AI service failed: {str(e)}"
+            status_code=500,
+            detail=f"Failed to process question: {str(e)}"
         )
 
-    page_numbers = set()
-    for match in re.finditer(r'\[Page (\d+)\]', answer):
-        page_num = int(match.group(1))
-        if any(p["page"] == page_num for p in pages):
-            page_numbers.add(page_num)
-
-    citations = sorted(list(page_numbers))
-
-    return {
-        "answer": answer,
-        "citations": citations
-    }
+    return result
