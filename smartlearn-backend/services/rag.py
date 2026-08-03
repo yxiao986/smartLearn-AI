@@ -3,6 +3,7 @@ import re
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Optional
+import datetime
 
 import faiss
 import numpy as np
@@ -11,6 +12,264 @@ from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
 
 _model_cache = {}
+
+
+# === Appendix A: PostgreSQL History Storage ===
+
+def _require_sqlalchemy() -> dict[str, Any]:
+  """Check SQLAlchemy availability and return required classes/functions.
+
+  Returns dict with Base, create_engine, Column, String, Integer, Text, DateTime, ForeignKey, etc.
+  Raises ImportError if SQLAlchemy or psycopg not available.
+  """
+  try:
+    from sqlalchemy import (
+      Column, String, Integer, Text, DateTime, ForeignKey, create_engine, event
+    )
+    from sqlalchemy.ext.declarative import declarative_base
+    from sqlalchemy.orm import sessionmaker, relationship
+
+    return {
+      'Column': Column,
+      'String': String,
+      'Integer': Integer,
+      'Text': Text,
+      'DateTime': DateTime,
+      'ForeignKey': ForeignKey,
+      'create_engine': create_engine,
+      'declarative_base': declarative_base,
+      'sessionmaker': sessionmaker,
+      'relationship': relationship,
+      'event': event,
+    }
+  except ImportError as e:
+    raise ImportError(f"SQLAlchemy or psycopg not installed: {e}")
+
+
+# Build SQLAlchemy models lazily
+_db_base = None
+_conversation_model = None
+_message_model = None
+
+def _build_db_models():
+  """Build and cache SQLAlchemy models."""
+  global _db_base, _conversation_model, _message_model
+  if _db_base is not None:
+    return _db_base, _conversation_model, _message_model
+
+  from sqlalchemy import Column, String, Integer, Text, DateTime, ForeignKey
+  from sqlalchemy.ext.declarative import declarative_base
+  from sqlalchemy.orm import relationship
+
+  _db_base = declarative_base()
+
+  class Conversation(_db_base):
+    __tablename__ = 'conversations'
+    id = Column(String, primary_key=True)
+    filename = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    messages = relationship('Message', back_populates='conversation', cascade='all, delete-orphan')
+
+  class Message(_db_base):
+    __tablename__ = 'messages'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    conversation_id = Column(String, ForeignKey('conversations.id'), nullable=False)
+    role = Column(String)
+    content = Column(Text)
+    citations = Column(Text)
+    sources = Column(Text)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    conversation = relationship('Conversation', back_populates='messages')
+
+  _conversation_model = Conversation
+  _message_model = Message
+  return _db_base, _conversation_model, _message_model
+
+
+def build_history_engine(db_url: str):
+  """Create SQLAlchemy engine from database URL.
+
+  Args:
+    db_url: Database URL (e.g., 'postgresql+psycopg://user:pass@localhost/dbname')
+
+  Returns:
+    SQLAlchemy engine
+  """
+  from sqlalchemy import create_engine
+  return create_engine(db_url, echo=False, pool_pre_ping=True)
+
+
+def build_history_session_factory(engine):
+  """Create SQLAlchemy session factory from engine.
+
+  Args:
+    engine: SQLAlchemy engine
+
+  Returns:
+    sessionmaker instance
+  """
+  from sqlalchemy.orm import sessionmaker
+  return sessionmaker(bind=engine, expire_on_commit=False)
+
+
+def ensure_history_tables(engine) -> None:
+  """Create conversation and message tables if they do not exist.
+
+  Args:
+    engine: SQLAlchemy engine
+  """
+  _db_base, _, _ = _build_db_models()
+  _db_base.metadata.create_all(engine)
+
+
+def get_or_create_conversation(session, chat_id: str, filename: str | None = None):
+  """Get existing conversation or create new one.
+
+  Args:
+    session: SQLAlchemy session
+    chat_id: Chat session ID
+    filename: Optional PDF filename
+
+  Returns:
+    Conversation model instance
+  """
+  _, Conversation, _ = _build_db_models()
+
+  conv = session.query(Conversation).filter(Conversation.id == chat_id).first()
+  if conv is None:
+    conv = Conversation(id=chat_id, filename=filename)
+    session.add(conv)
+    session.commit()
+
+  return conv
+
+
+def load_history_from_db(session, chat_id: str) -> list[dict]:
+  """Load conversation history from database.
+
+  Args:
+    session: SQLAlchemy session
+    chat_id: Chat session ID
+
+  Returns:
+    List of turns in format [{"question": "...", "answer": "...", "citations": [...], "sources": [...]}, ...]
+  """
+  _, Conversation, Message = _build_db_models()
+
+  conv = session.query(Conversation).filter(Conversation.id == chat_id).first()
+  if conv is None or not conv.messages:
+    return []
+
+  history = []
+  messages = sorted(conv.messages, key=lambda m: m.created_at)
+
+  i = 0
+  while i < len(messages):
+    if messages[i].role == 'user':
+      turn = {'question': messages[i].content}
+      if i + 1 < len(messages) and messages[i + 1].role == 'assistant':
+        turn['answer'] = messages[i + 1].content
+        turn['citations'] = json.loads(messages[i + 1].citations or '[]')
+        turn['sources'] = json.loads(messages[i + 1].sources or '[]')
+        i += 2
+      else:
+        turn['answer'] = ''
+        turn['citations'] = []
+        turn['sources'] = []
+        i += 1
+      history.append(turn)
+    else:
+      i += 1
+
+  return history
+
+
+def store_history_turn(session, chat_id: str, question: str, result: dict, filename: str | None = None) -> list[dict]:
+  """Store a Q&A turn in the database.
+
+  Args:
+    session: SQLAlchemy session
+    chat_id: Chat session ID
+    question: User question
+    result: Answer result dict with 'answer', 'citations', 'sources'
+    filename: Optional PDF filename
+
+  Returns:
+    Updated history list
+  """
+  _, Conversation, Message = _build_db_models()
+
+  conv = get_or_create_conversation(session, chat_id, filename)
+
+  user_msg = Message(
+    conversation_id=chat_id,
+    role='user',
+    content=question
+  )
+  session.add(user_msg)
+
+  assistant_msg = Message(
+    conversation_id=chat_id,
+    role='assistant',
+    content=result.get('answer', ''),
+    citations=json.dumps(result.get('citations', [])),
+    sources=json.dumps(result.get('sources', []))
+  )
+  session.add(assistant_msg)
+  session.commit()
+
+  return load_history_from_db(session, chat_id)
+
+
+def answer_chat_turn_with_history_store(
+    document: dict,
+    chat_id: str,
+    message: str,
+    session_factory,
+    top_k: int = 3,
+    candidate_pool: int = 60,
+    answer_model: str = "poolside/laguna-s-2.1:free"
+) -> dict:
+  """Full RAG turn with PostgreSQL history persistence.
+
+  Loads previous turns from DB, retrieves fresh evidence, answers the question,
+  and saves the new turn to DB.
+
+  Args:
+    document: Prepared document record from prepare_rag_document()
+    chat_id: Chat session ID
+    message: User message/question
+    session_factory: SQLAlchemy sessionmaker
+    top_k: Number of top chunks to retrieve
+    candidate_pool: Rerank from top-N
+    answer_model: LLM model for answering
+
+  Returns:
+    Dict with answer, citations, sources
+  """
+  session = session_factory()
+  try:
+    old_history = load_history_from_db(session, chat_id)
+    filename = document.get('filename')
+    get_or_create_conversation(session, chat_id, filename)
+  finally:
+    session.close()
+
+  result = answer_document(
+    document,
+    message,
+    top_k=top_k,
+    candidate_pool=candidate_pool,
+    answer_model=answer_model
+  )
+
+  session = session_factory()
+  try:
+    store_history_turn(session, chat_id, message, result, filename=document.get('filename'))
+  finally:
+    session.close()
+
+  return result
 
 
 def clean_text(text: str) -> str:

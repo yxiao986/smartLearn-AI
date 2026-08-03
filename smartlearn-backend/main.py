@@ -16,6 +16,19 @@ documents: dict[str, dict] = {}
 UPLOADS_ROOT = Path("smartlearn-backend/uploads")
 UPLOADS_ROOT.mkdir(parents=True, exist_ok=True)
 
+# Appendix A: PostgreSQL history storage (optional)
+db_url = os.getenv("DAY3_DB_URL")
+db_session_factory = None
+if db_url:
+  try:
+    engine = rag.build_history_engine(db_url)
+    rag.ensure_history_tables(engine)
+    db_session_factory = rag.build_history_session_factory(engine)
+    print(f"Database initialized at {db_url}")
+  except Exception as e:
+    print(f"Warning: Failed to initialize database: {e}")
+    db_session_factory = None
+
 class ChatRequest(BaseModel):
     chat_id: str = Field(..., description="Chat session ID")
     message: str = Field(..., min_length=1, max_length=2000, description="User message")
@@ -125,14 +138,27 @@ async def chat(request: ChatRequest):
     document = documents[request.chat_id]
 
     try:
-        result = rag.answer_chat_turn(
-            document,
-            request.message,
-            top_k=3,
-            candidate_pool=60,
-            answer_model="poolside/laguna-s-2.1:free",
-            current_page=request.current_page
-        )
+        if db_session_factory:
+            # Appendix A: Use database-backed history
+            result = rag.answer_chat_turn_with_history_store(
+                document,
+                request.chat_id,
+                request.message,
+                db_session_factory,
+                top_k=3,
+                candidate_pool=60,
+                answer_model="poolside/laguna-s-2.1:free"
+            )
+        else:
+            # Lab C: Use in-memory history
+            result = rag.answer_chat_turn(
+                document,
+                request.message,
+                top_k=3,
+                candidate_pool=60,
+                answer_model="poolside/laguna-s-2.1:free",
+                current_page=request.current_page
+            )
     except Exception as e:
         raise HTTPException(
             status_code=500,
