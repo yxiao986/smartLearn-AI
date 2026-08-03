@@ -262,6 +262,100 @@ body {
   color: #444;
   line-height: 1.6;
   word-wrap: break-word;
+  display: flex;
+  gap: 0.4rem;
+  align-items: baseline;
+}
+
+.answer strong {
+  flex-shrink: 0;
+}
+
+/* Rendered markdown. The global reset strips every default margin, so the
+   block spacing has to be restored here. min-width keeps wide code blocks,
+   tables and display math from stretching the message bubble. */
+.answer-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.answer-body > :first-child {
+  margin-top: 0;
+}
+
+.answer-body > :last-child {
+  margin-bottom: 0;
+}
+
+.answer-body p {
+  margin: 0 0 0.6rem 0;
+}
+
+.answer-body ul,
+.answer-body ol {
+  margin: 0 0 0.6rem 0;
+  padding-left: 1.3rem;
+}
+
+.answer-body li {
+  margin-bottom: 0.2rem;
+}
+
+.answer-body h1,
+.answer-body h2,
+.answer-body h3,
+.answer-body h4 {
+  margin: 0.8rem 0 0.4rem 0;
+  font-size: 1rem;
+  color: #1f2937;
+}
+
+.answer-body code {
+  background: #f3f4f6;
+  padding: 0.1rem 0.3rem;
+  border-radius: 3px;
+  font-size: 0.88em;
+}
+
+.answer-body pre {
+  background: #f3f4f6;
+  padding: 0.6rem 0.75rem;
+  border-radius: 4px;
+  margin: 0 0 0.6rem 0;
+  overflow-x: auto;
+}
+
+.answer-body pre code {
+  background: none;
+  padding: 0;
+}
+
+.answer-body blockquote {
+  margin: 0 0 0.6rem 0;
+  padding-left: 0.75rem;
+  border-left: 3px solid #e5e7eb;
+  color: #6b7280;
+}
+
+.answer-body table {
+  border-collapse: collapse;
+  margin: 0 0 0.6rem 0;
+  display: block;
+  overflow-x: auto;
+}
+
+.answer-body th,
+.answer-body td {
+  border: 1px solid #e5e7eb;
+  padding: 0.3rem 0.5rem;
+  text-align: left;
+}
+
+.answer-body .katex-display {
+  margin: 0.5rem 0;
+  padding: 0.15rem 0;
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .citations {

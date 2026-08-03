@@ -1,4 +1,9 @@
 import { useState, useEffect, useRef } from 'react'
+import Markdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import remarkMath from 'remark-math'
+import rehypeKatex from 'rehype-katex'
+import 'katex/dist/katex.min.css'
 import { askQuestion } from './api.js'
 
 const SUGGESTIONS = [
@@ -87,7 +92,15 @@ export function ChatPanel({ enabled, onBusy, disabled, currentPage, onJumpToPage
                   <strong>Q:</strong> {msg.question}
                 </div>
                 <div className="answer">
-                  <strong>A:</strong> {msg.answer}
+                  <strong>A:</strong>
+                  <div className="answer-body">
+                    <Markdown
+                      remarkPlugins={[remarkGfm, remarkMath]}
+                      rehypePlugins={[rehypeKatex]}
+                    >
+                      {msg.answer}
+                    </Markdown>
+                  </div>
                 </div>
                 {msg.citations && msg.citations.length > 0 && (
                   <div className="citations">
