@@ -6,15 +6,15 @@ load_dotenv()
 sys.path.insert(0, str(Path(__file__).parent))
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, status
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import os
 from services import rag
 
+# In-memory only: a restart drops every document, so there is nothing to gain
+# from also keeping the uploaded PDF on disk.
 documents: dict[str, dict] = {}
-UPLOADS_ROOT = Path("smartlearn-backend/uploads")
-UPLOADS_ROOT.mkdir(parents=True, exist_ok=True)
 
 # Appendix A: PostgreSQL history storage (optional)
 db_url = os.getenv("DAY3_DB_URL")
@@ -67,11 +67,6 @@ async def upload(chat_id: str, file: UploadFile = File(...)):
     if not pdf_bytes:
         raise HTTPException(status_code=400, detail="File is empty")
 
-    chat_uploads_dir = UPLOADS_ROOT / chat_id
-    chat_uploads_dir.mkdir(parents=True, exist_ok=True)
-    saved_pdf_path = chat_uploads_dir / (file.filename or "document.pdf")
-    saved_pdf_path.write_bytes(pdf_bytes)
-
     try:
         pages = rag.extract_pages_for_rag(pdf_bytes)
     except ValueError as e:
@@ -96,7 +91,7 @@ async def upload(chat_id: str, file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to prepare RAG document: {str(e)}")
 
-    document["saved_pdf_path"] = str(saved_pdf_path.resolve())
+    document["pdf_bytes"] = pdf_bytes
     documents[chat_id] = document
 
     return {
@@ -111,18 +106,13 @@ def get_document_file(chat_id: str):
     if chat_id not in documents:
         raise HTTPException(status_code=404, detail=f"Chat ID '{chat_id}' not found.")
 
-    document = documents[chat_id]
-    file_path = document.get("saved_pdf_path")
+    pdf_bytes = documents[chat_id].get("pdf_bytes")
 
-    if not file_path:
-        raise HTTPException(status_code=404, detail="Saved PDF path not found in document record.")
+    if not pdf_bytes:
+        raise HTTPException(status_code=404, detail="No PDF stored for this chat session.")
 
-    file_path = Path(file_path)
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail="Saved PDF file not found on disk.")
-
-    return FileResponse(
-        str(file_path),
+    return Response(
+        content=pdf_bytes,
         media_type="application/pdf",
         headers={"Content-Disposition": "inline"}
     )
