@@ -69,6 +69,25 @@ def save_json(obj: Any, path: str | Path) -> None:
     json.dump(obj, f, indent=2, ensure_ascii=False)
 
 
+def relative_path_str(path: str | Path, base: str | Path) -> str:
+  """Convert absolute path to relative path string from base directory.
+
+  Args:
+    path: Absolute or relative path to convert
+    base: Base directory to compute relative path from
+
+  Returns:
+    Relative path as string (using forward slashes for portability)
+  """
+  path = Path(path).resolve()
+  base = Path(base).resolve()
+  try:
+    rel = path.relative_to(base)
+    return str(rel).replace("\\", "/")
+  except ValueError:
+    return str(path)
+
+
 def load_json(path: str | Path) -> Any:
   """Read JSON file back into Python object."""
   path = Path(path)
@@ -342,19 +361,48 @@ def load_model(model_name: str, device: str):
   return _model_cache[key]
 
 
-def embed_texts(texts: list[str], model, device: str, batch_size: int = 32) -> np.ndarray:
+def embed_texts(
+    texts: list[str],
+    model: SentenceTransformer | str | dict | None = None,
+    model_name: str | None = None,
+    model_cache_dir: str | Path | None = None,
+    device: str | None = None,
+    batch_size: int = 32
+) -> np.ndarray:
   """Encode texts into normalized float32 vectors.
+
+  Accepts flexible model input: SentenceTransformer instance, model name string, or document dict.
 
   Args:
     texts: List of text strings
-    model: SentenceTransformer instance
-    device: "cpu" or "cuda"
+    model: SentenceTransformer instance, model name string, document dict, or None (defaults to all-MiniLM-L6-v2)
+    model_name: Explicit model name override (takes priority over model parameter)
+    model_cache_dir: Optional cache directory for models (reserved for future use)
+    device: "cpu" or "cuda" (auto-detected if None)
     batch_size: Number of texts to encode at once
 
   Returns:
     numpy array of shape (len(texts), embedding_dim), dtype float32
   """
-  embeddings = model.encode(texts, batch_size=batch_size, convert_to_numpy=True)
+  if device is None:
+    device = get_device()
+
+  resolved_model_name = model_name
+
+  if resolved_model_name is None:
+    if isinstance(model, str):
+      resolved_model_name = model
+    elif isinstance(model, dict):
+      resolved_model_name = model.get("model_name", "sentence-transformers/all-MiniLM-L6-v2")
+    else:
+      resolved_model_name = "sentence-transformers/all-MiniLM-L6-v2"
+
+  if isinstance(model, SentenceTransformer):
+    embedding_model = model
+  else:
+    embedding_model = load_model(resolved_model_name, device)
+
+  embeddings = embedding_model.encode(texts, batch_size=batch_size, convert_to_numpy=True)
   return embeddings.astype(np.float32)
 
 
@@ -419,11 +467,13 @@ def ensure_artifacts(
     artifact_root: Root directory for artifacts
 
   Returns:
-    Bundle dict with keys: pages, chunks, embeddings, manifest
+    Bundle dict with keys: pages, chunks, embeddings, manifest, model_name, model_source, artifact_root, artifact_paths
     - pages: list of {page, text}
     - chunks: list of chunk dicts from build_chunks()
     - embeddings: np.ndarray of shape (num_chunks, embedding_dim), dtype float32
-    - manifest: dict with metadata (num_pages, num_chunks, embedding_dim, device, chunk_mode, chunk_size, overlap, model_name, paths)
+    - manifest: dict with metadata including model_name, model_source, device, chunk_mode, chunk_size, overlap
+    - artifact_root: resolved absolute path to artifact root
+    - artifact_paths: dict with paths to all saved artifacts
   """
   artifact_root = Path(artifact_root)
   tag = model_tag(model_name)
@@ -448,12 +498,13 @@ def ensure_artifacts(
     "document_id": document_id,
     "pdf_name": pdf_name,
     "num_pages": len(pages),
+    "num_chunks": len(chunks),
+    "embedding_dim": embeddings.shape[1],
     "chunk_mode": chunk_mode,
     "chunk_size": chunk_size,
     "overlap": overlap,
     "model_name": model_name,
-    "num_chunks": len(chunks),
-    "embedding_dim": embeddings.shape[1],
+    "model_source": "sentence-transformers",
     "device": device,
     "chunk_path": str(paths["chunk_path"]),
     "embedding_path": str(paths["embedding_path"]),
@@ -466,7 +517,16 @@ def ensure_artifacts(
       "pages": pages,
       "chunks": chunks,
       "embeddings": embeddings,
-      "manifest": manifest
+      "manifest": manifest,
+      "model_name": model_name,
+      "model_source": "sentence-transformers",
+      "artifact_root": str(artifact_root.resolve()),
+      "artifact_paths": {
+        "raw_pages": str(paths["raw_pages_path"].resolve()),
+        "chunks": str(paths["chunk_path"].resolve()),
+        "embeddings": str(paths["embedding_path"].resolve()),
+        "manifest": str(paths["manifest_path"].resolve())
+      }
   }
 
 
@@ -564,8 +624,8 @@ def prepare_rag_document(
     artifact_root: Root directory for artifacts (optional)
 
   Returns:
-    Document record dict with: document_id, filename, num_pages, pages,
-    chunks, embeddings, manifest, index, and display paths
+    Document record dict with: document_id, filename, num_pages, model_name, model_source,
+    pages, chunks, embeddings, manifest, artifact_root, artifacts, history
   """
   if artifact_root is None:
     artifact_root = Path("artifacts")
@@ -590,7 +650,11 @@ def prepare_rag_document(
     "num_pages": len(pages),
     "chunk_size": chunk_size,
     "embedding_dim": bundle["embeddings"].shape[1],
+    "model_name": bundle["model_name"],
+    "model_source": bundle["model_source"],
     "pages": bundle["pages"],
+    "chunks": bundle["chunks"],
+    "embeddings": bundle["embeddings"],
     "artifact_root": bundle["artifact_root"],
     "artifacts": bundle["artifact_paths"],
     "manifest": bundle["manifest"],
@@ -786,7 +850,7 @@ def ensure_index(
     artifact_root: Root directory for artifacts (default: "artifacts")
 
   Returns:
-    Bundle dict with keys: pages, chunks, embeddings, manifest, index, artifact_paths
+    Bundle dict with keys: pages, chunks, embeddings, manifest, index, model_name, model_source, artifact_root, artifact_paths
   """
   if artifact_root is None:
     artifact_root = "artifacts"
@@ -831,6 +895,8 @@ def ensure_index(
     "embeddings": embeddings,
     "manifest": manifest,
     "index": index,
+    "model_name": model_name,
+    "model_source": "sentence-transformers",
     "artifact_root": str(artifact_root.resolve()),
     "artifact_paths": {
       "raw_pages": str(paths["raw_pages_path"].resolve()),
@@ -1092,3 +1158,273 @@ def evaluate_questions(
     })
 
   return pd.DataFrame(results)
+
+
+def _require_chromadb():
+  """Import and return chromadb module or raise clear ImportError.
+
+  Returns:
+    chromadb module
+  """
+  try:
+    import chromadb
+    return chromadb
+  except ImportError:
+    raise ImportError(
+      "chromadb is required for Chroma-based retrieval. "
+      "Install with: pip install chromadb"
+    )
+
+
+def build_chroma_collection(
+    document_id: str,
+    chunks: list[dict] | str | Path,
+    embeddings: np.ndarray | str | Path,
+    persist_dir: str | Path
+) -> dict:
+  """Build a persistent Chroma collection from chunks and embeddings.
+
+  Reuses chunk records and embedding matrix from Lab B (ensure_artifacts).
+  Automatically loads chunks and embeddings from disk if file paths provided.
+
+  Args:
+    document_id: Unique document identifier
+    chunks: List of chunk dicts with page, chunk_id, text fields, OR path to chunks.json
+    embeddings: np.ndarray of shape (num_chunks, embedding_dim) dtype float32, OR path to .npy file
+    persist_dir: Directory for Chroma persistent storage
+
+  Returns:
+    Metadata dict with collection name and item count
+  """
+  chromadb = _require_chromadb()
+
+  if isinstance(chunks, (str, Path)):
+    chunks = load_json(chunks)
+
+  if isinstance(embeddings, (str, Path)):
+    embeddings = np.load(embeddings)
+
+  persist_dir = Path(persist_dir)
+  chroma_storage = persist_dir / f"{document_id}_chroma"
+  chroma_storage.mkdir(parents=True, exist_ok=True)
+
+  client = chromadb.PersistentClient(path=str(chroma_storage))
+  collection = client.get_or_create_collection(
+    name=f"{document_id}_collection",
+    metadata={"hnsw:space": "l2"}
+  )
+
+  ids = [chunk["chunk_id"] for chunk in chunks]
+  metadatas = [
+    {"page": chunk["page"]}
+    for chunk in chunks
+  ]
+  documents = [chunk["text"] for chunk in chunks]
+
+  collection.upsert(
+    ids=ids,
+    embeddings=embeddings,
+    metadatas=metadatas,
+    documents=documents
+  )
+
+  return {
+    "collection_name": f"{document_id}_collection",
+    "item_count": len(chunks),
+    "storage_path": str(chroma_storage)
+  }
+
+
+def query_chroma_collection(
+    document_id: str,
+    query_embedding: np.ndarray | list,
+    persist_dir: str | Path,
+    top_k: int = 3
+) -> list[dict]:
+  """Query a Chroma collection with an embedding vector.
+
+  Args:
+    document_id: Document identifier (collection name key)
+    query_embedding: Query vector of shape (embedding_dim,) or (1, embedding_dim) as numpy array or list
+    persist_dir: Directory containing Chroma storage
+    top_k: Number of top results to return
+
+  Returns:
+    List of hits with chunk_id, page, text, and score
+  """
+  chromadb = _require_chromadb()
+  persist_dir = Path(persist_dir)
+  chroma_storage = persist_dir / f"{document_id}_chroma"
+
+  if not chroma_storage.exists():
+    return []
+
+  client = chromadb.PersistentClient(path=str(chroma_storage))
+  collection = client.get_collection(name=f"{document_id}_collection")
+
+  if isinstance(query_embedding, np.ndarray):
+    query_embedding = query_embedding.tolist()
+
+  if isinstance(query_embedding, list):
+    if len(query_embedding) > 0 and not isinstance(query_embedding[0], list):
+      query_embeddings = [query_embedding]
+    else:
+      query_embeddings = query_embedding
+  else:
+    raise TypeError(f"query_embedding must be numpy array or list, got {type(query_embedding)}")
+
+  results = collection.query(
+    query_embeddings=query_embeddings,
+    n_results=top_k
+  )
+
+  hits = []
+  if results and results["ids"] and len(results["ids"]) > 0:
+    for i, chunk_id in enumerate(results["ids"][0]):
+      distance = results["distances"][0][i] if results["distances"] else 0
+      score = 1.0 / (1.0 + distance)
+
+      page = results["metadatas"][0][i]["page"]
+      text = results["documents"][0][i]
+
+      hits.append({
+        "chunk_id": chunk_id,
+        "page": page,
+        "text": text,
+        "score": score
+      })
+
+  return hits
+
+
+def search_document_with_chroma(
+    question: str,
+    document: dict,
+    persist_dir: str | Path,
+    top_k: int = 3,
+    batch_size: int = 1
+) -> list[dict]:
+  """Retrieve top-k chunks from Chroma collection.
+
+  Args:
+    question: User question
+    document: Prepared document from prepare_rag_document()
+    persist_dir: Directory containing Chroma storage
+    top_k: Number of top results
+    batch_size: Batch size for embedding (default 1)
+
+  Returns:
+    List of hits in FAISS-compatible format
+  """
+  device = get_device()
+  model = load_model("sentence-transformers/all-MiniLM-L6-v2", device)
+
+  q_embedding = embed_texts([question], model, device, batch_size=batch_size)
+  q_embedding_normalized = q_embedding / (np.linalg.norm(q_embedding, axis=1, keepdims=True) + 1e-8)
+
+  return query_chroma_collection(
+    document["document_id"],
+    q_embedding_normalized[0],
+    persist_dir,
+    top_k=top_k
+  )
+
+
+def answer_document_with_chroma(
+    document: dict,
+    question: str,
+    persist_dir: str | Path,
+    top_k: int = 3,
+    answer_model: str = "tencent/hy3:free"
+) -> dict:
+  """Retrieve and answer using Chroma collection.
+
+  Args:
+    document: Prepared document
+    question: User question
+    persist_dir: Directory containing Chroma storage
+    top_k: Number of top chunks to retrieve
+    answer_model: LLM model for answering (used if API key available)
+
+  Returns:
+    Dict with answer, citations, and sources
+  """
+  hits = search_document_with_chroma(question, document, persist_dir, top_k=top_k)
+
+  if not hits:
+    return {
+      "answer": "No relevant content found in the document.",
+      "citations": [],
+      "sources": []
+    }
+
+  api_key = None
+  try:
+    import os
+    api_key = os.getenv("OPENROUTER_API_KEY")
+  except:
+    pass
+
+  if api_key:
+    try:
+      from services.llm import answer_from_pages
+      chunk_records = [
+        {"page": hit["page"], "text": hit["text"]}
+        for hit in hits
+      ]
+      llm_answer = answer_from_pages(chunk_records, question)
+      answer = llm_answer
+    except Exception:
+      answer = best_sentence_answer(question, hits)
+  else:
+    answer = best_sentence_answer(question, hits)
+
+  citations = extract_citations(answer, hits)
+  sources = build_sources(hits)
+
+  return {
+    "answer": answer,
+    "citations": citations,
+    "sources": sources
+  }
+
+
+def ensure_artifact_dirs(artifact_root: str | Path | None = None) -> dict[str, Path]:
+  """Return all artifact directories including Chroma storage.
+
+  Args:
+    artifact_root: Root artifact directory (default: "artifacts")
+
+  Returns:
+    Dict with paths to raw_pages, chunks, embeddings, indexes, reports, chroma directories
+  """
+  if artifact_root is None:
+    artifact_root = Path("artifacts")
+  else:
+    artifact_root = Path(artifact_root)
+
+  artifact_root.mkdir(parents=True, exist_ok=True)
+
+  raw_pages_dir = artifact_root / "raw_pages"
+  chunks_dir = artifact_root / "chunks"
+  embeddings_dir = artifact_root / "embeddings"
+  indexes_dir = artifact_root / "indexes"
+  reports_dir = artifact_root / "reports"
+  chroma_dir = artifact_root / "chroma"
+
+  raw_pages_dir.mkdir(parents=True, exist_ok=True)
+  chunks_dir.mkdir(parents=True, exist_ok=True)
+  embeddings_dir.mkdir(parents=True, exist_ok=True)
+  indexes_dir.mkdir(parents=True, exist_ok=True)
+  reports_dir.mkdir(parents=True, exist_ok=True)
+  chroma_dir.mkdir(parents=True, exist_ok=True)
+
+  return {
+    "artifact_root": artifact_root,
+    "raw_pages": raw_pages_dir,
+    "chunks": chunks_dir,
+    "embeddings": embeddings_dir,
+    "indexes": indexes_dir,
+    "reports": reports_dir,
+    "chroma": chroma_dir
+  }
