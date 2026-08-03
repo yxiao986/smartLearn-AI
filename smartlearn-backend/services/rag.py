@@ -210,6 +210,70 @@ def chunk_by_characters(records: list[dict], chunk_size: int, overlap: int = 0) 
   return chunks
 
 
+def chunk_with_langchain_recursive(
+    records: list[dict],
+    chunk_size: int,
+    chunk_overlap: int,
+    separators: Optional[list[str]] = None
+) -> list[dict]:
+  """Split records using LangChain's RecursiveCharacterTextSplitter.
+
+  Respects semantic boundaries (double newline → single newline → space → character).
+  Cleaner output on noisy PDF text where paragraph breaks are incomplete.
+
+  Args:
+    records: List of {page, text} records from extract_pages_for_rag
+    chunk_size: Target chunk size in characters
+    chunk_overlap: Overlap between consecutive chunks
+    separators: List of separators to try in order. Defaults to ["\n\n", "\n", " ", ""]
+
+  Returns:
+    List of chunks with {chunk_id, page, text, chunk_mode: "langchain_recursive"}
+
+  Raises:
+    ImportError: If langchain-text-splitters is not installed
+  """
+  try:
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+  except ImportError:
+    raise ImportError(
+      "langchain-text-splitters is required for langchain_recursive mode. "
+      "Install it with: pip install langchain-text-splitters"
+    )
+
+  if separators is None:
+    separators = ["\n\n", "\n", " ", ""]
+
+  splitter = RecursiveCharacterTextSplitter(
+    chunk_size=chunk_size,
+    chunk_overlap=chunk_overlap,
+    separators=separators,
+    keep_separator=False
+  )
+
+  chunks = []
+  chunk_id = 0
+
+  for record in records:
+    page = record["page"]
+    text = record["text"]
+
+    split_texts = splitter.split_text(text)
+
+    for chunk_text in split_texts:
+      chunk_text = chunk_text.strip()
+      if chunk_text:
+        chunks.append({
+          "chunk_id": f"page_{page}_chunk_{chunk_id}",
+          "page": page,
+          "text": chunk_text,
+          "chunk_mode": "langchain_recursive"
+        })
+        chunk_id += 1
+
+  return chunks
+
+
 def build_chunks(
     records: list[dict],
     chunk_mode: str,
@@ -220,9 +284,9 @@ def build_chunks(
 
   Args:
     records: List of {page, text} records from extract_pages_for_rag
-    chunk_mode: "paragraph", "character", or "character_overlap"
+    chunk_mode: "paragraph", "character", "character_overlap", or "langchain_recursive"
     chunk_size: Target chunk size in characters
-    overlap: Overlap characters (only used for "character_overlap")
+    overlap: Overlap characters (used for "character_overlap" and "langchain_recursive")
 
   Returns:
     List of chunks with {chunk_id, page, text, chunk_mode}
@@ -233,8 +297,10 @@ def build_chunks(
     return chunk_by_characters(records, chunk_size, overlap=0)
   elif chunk_mode == "character_overlap":
     return chunk_by_characters(records, chunk_size, overlap=overlap)
+  elif chunk_mode == "langchain_recursive":
+    return chunk_with_langchain_recursive(records, chunk_size, overlap)
   else:
-    raise ValueError(f"Unknown chunk_mode: {chunk_mode}. Must be one of: paragraph, character, character_overlap")
+    raise ValueError(f"Unknown chunk_mode: {chunk_mode}. Must be one of: paragraph, character, character_overlap, langchain_recursive")
 
 
 def model_tag(model_name: str) -> str:
