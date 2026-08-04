@@ -753,7 +753,7 @@ def ensure_artifacts(
 
   texts = [c["text"] for c in chunks]
   model = load_model(model_name, device)
-  embeddings = embed_texts(texts, model, device, batch_size=batch_size)
+  embeddings = embed_texts(texts, model, device=device, batch_size=batch_size)
 
   np.save(paths["embedding_path"], embeddings)
 
@@ -840,24 +840,6 @@ def load_faiss_index(index_path: str | Path, artifact_root: str | Path | None = 
       index_path = resolved_path
 
   return faiss.read_index(str(index_path))
-
-
-def relative_path_str(path: str | Path, base: str | Path) -> str:
-  """Convert absolute path to relative display string.
-
-  Args:
-    path: Full path to file
-    base: Base directory for relative path
-
-  Returns:
-    Relative path as string (e.g., "doc_1_lecture/embeddings_all-MiniLM-L6-v2_cpu.npy")
-  """
-  path = Path(path)
-  base = Path(base)
-  try:
-    return str(path.relative_to(base))
-  except ValueError:
-    return str(path)
 
 
 def prepare_rag_document(
@@ -970,7 +952,7 @@ def search_bundle(
   device = get_device()
   model = load_model("sentence-transformers/all-MiniLM-L6-v2", device)
 
-  q_embedding = embed_texts([question], model, device, batch_size=batch_size)
+  q_embedding = embed_texts([question], model, device=device, batch_size=batch_size)
   q_embedding_normalized = q_embedding / (np.linalg.norm(q_embedding, axis=1, keepdims=True) + 1e-8)
 
   index = bundle["index"]
@@ -1322,12 +1304,6 @@ def answer_document(
     api_key = os.getenv("OPENROUTER_API_KEY")
   except:
     pass
-
-  import sys
-  print(f"DEBUG: api_key={'SET' if api_key else 'NOT SET'}, current_page={current_page}", file=sys.stderr)
-  print(f"DEBUG: retrieved {len(hits)} hits from search_document", file=sys.stderr)
-  for i, hit in enumerate(hits[:3]):
-    print(f"  [{i}] Page {hit.get('page')}: score={hit.get('score'):.3f}", file=sys.stderr)
 
   if api_key:
     try:
@@ -1690,7 +1666,7 @@ def search_document_with_chroma(
   device = get_device()
   model = load_model("sentence-transformers/all-MiniLM-L6-v2", device)
 
-  q_embedding = embed_texts([question], model, device, batch_size=batch_size)
+  q_embedding = embed_texts([question], model, device=device, batch_size=batch_size)
   q_embedding_normalized = q_embedding / (np.linalg.norm(q_embedding, axis=1, keepdims=True) + 1e-8)
 
   return query_chroma_collection(
