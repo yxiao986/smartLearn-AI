@@ -1163,18 +1163,51 @@ def ensure_index(
   }
 
 
+# Ways the model reports that the PDF does not cover the question. The system
+# prompt asks for one phrasing, but models vary, so each pattern accepts both
+# the written-out and contracted negation ("does not" / "doesn't").
+NO_ANSWER_PATTERNS = (
+  r"\bdo(?:es)?\s*n(?:o|')?t\s+(?:provide|contain|mention|discuss|include|specify|state|say)\b",
+  # "cannot" / "can't" share the n with can, so they need their own branch.
+  r"\b(?:can(?:no|')?t|(?:could|did|do(?:es)?|would)\s*n(?:o|')?t)\s+(?:find|answer|locate|determine|tell)\b",
+  r"\bunable\s+to\s+(?:find|answer|determine)\b",
+  r"\bnot\s+(?:mentioned|found|discussed|provided|available)\b",
+  r"\bno\s+(?:relevant|such)\s+(?:content|information|section|passage|text)\b",
+  r"\bnot\s+in\s+(?:the|this)\s+(?:document|pdf|paper|text)\b",
+  r"\bi\s+d(?:o\s+not|on'?t)\s+know\b",
+  r"\b(?:not\s+enough|insufficient)\s+information\b",
+)
+
+_NO_ANSWER_RE = re.compile("|".join(NO_ANSWER_PATTERNS), re.IGNORECASE)
+
+
+def is_no_answer(answer: str) -> bool:
+  """True when the answer says the document does not cover the question.
+
+  Used to suppress fallback citations: a reply that found nothing should not be
+  decorated with whatever pages retrieval happened to return. Only consulted
+  when the answer carries no [Page N] tag of its own, so an answer that both
+  cites a page and uses one of these phrases keeps its real citation.
+  """
+  if not answer or not answer.strip():
+    return True
+
+  return _NO_ANSWER_RE.search(answer) is not None
+
+
 def extract_citations(answer: str, hits: list[dict] | None = None) -> list[int]:
   """Extract numeric PDF page citations from answer text.
 
   Searches for [Page X] tags in answer; if found, extracts page numbers.
-  Falls back to pages from top hits if no tags found.
+  Falls back to pages from top hits if no tags found, unless the answer says
+  the document does not cover the question.
 
   Args:
     answer: Answer text that may contain [Page X] tags
     hits: Optional list of retrieval hits to use as fallback
 
   Returns:
-    Sorted list of unique page numbers
+    Sorted list of unique page numbers, empty when nothing supports an answer
   """
   citations = set()
 
@@ -1182,7 +1215,9 @@ def extract_citations(answer: str, hits: list[dict] | None = None) -> list[int]:
   for match in page_matches:
     citations.add(int(match))
 
-  if not citations and hits:
+  # Only fall back to the retrieved pages when the answer actually used the
+  # document. A "not in this PDF" reply cites nothing.
+  if not citations and hits and not is_no_answer(answer):
     for hit in hits[:3]:
       citations.add(hit.get("page"))
 
