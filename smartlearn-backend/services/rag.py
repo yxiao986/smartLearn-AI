@@ -228,7 +228,8 @@ def answer_chat_turn_with_history_store(
     session_factory,
     top_k: int = 3,
     candidate_pool: int = 60,
-    answer_model: str = "poolside/laguna-s-2.1:free"
+    answer_model: str = "poolside/laguna-s-2.1:free",
+    current_page: int = None
 ) -> dict:
   """Full RAG turn with PostgreSQL history persistence.
 
@@ -243,6 +244,7 @@ def answer_chat_turn_with_history_store(
     top_k: Number of top chunks to retrieve
     candidate_pool: Rerank from top-N
     answer_model: LLM model for answering
+    current_page: Current PDF page for context (optional)
 
   Returns:
     Dict with answer, citations, sources
@@ -260,7 +262,9 @@ def answer_chat_turn_with_history_store(
     message,
     top_k=top_k,
     candidate_pool=candidate_pool,
-    answer_model=answer_model
+    answer_model=answer_model,
+    current_page=current_page,
+    history=old_history
   )
 
   session = session_factory()
@@ -1229,6 +1233,13 @@ def build_sources(hits: list[dict]) -> list[dict]:
   return sources
 
 
+# How much of the earlier conversation to replay to the model. Only the recent
+# turns matter, and past answers are summarised so they cannot crowd out the
+# retrieved evidence.
+HISTORY_TURNS = 3
+HISTORY_ANSWER_CHARS = 300
+
+
 def build_grounded_user_prompt(
     question: str,
     hits: list[dict],
@@ -1250,15 +1261,20 @@ def build_grounded_user_prompt(
 
   if history:
     lines.append("## Conversation History")
-    for turn in history[-3:]:
-      lines.append(f"Q: {turn['question']}")
-      lines.append(f"A: {turn['answer'][:200]}...")
+    for turn in history[-HISTORY_TURNS:]:
+      answer = turn.get("answer", "")
+      if len(answer) > HISTORY_ANSWER_CHARS:
+        answer = answer[:HISTORY_ANSWER_CHARS].rstrip() + "..."
+      lines.append(f"Q: {turn.get('question', '')}")
+      lines.append(f"A: {answer}")
       lines.append("")
 
   if hits:
     lines.append("## Retrieved Evidence")
-    for i, hit in enumerate(hits[:3], 1):
-      lines.append(f"[{i}] Page {hit['page']}: {hit['text'][:300]}...")
+    # Evidence goes in whole: chunks are already bounded by chunk_size, and
+    # truncating them here would drop most of what retrieval just selected.
+    for i, hit in enumerate(hits, 1):
+      lines.append(f"[{i}] Page {hit['page']}: {hit['text']}")
       lines.append("")
 
   lines.append("## Current Question")
@@ -1273,7 +1289,8 @@ def answer_document(
     top_k: int = 3,
     candidate_pool: int = 60,
     answer_model: str = "tencent/hy3:free",
-    current_page: int = None
+    current_page: int = None,
+    history: list[dict] | None = None
 ) -> dict:
   """Retrieve relevant chunks and optionally call LLM for answer.
 
@@ -1284,6 +1301,8 @@ def answer_document(
     candidate_pool: Rerank from top-N
     answer_model: LLM model for answering (used if API key available)
     current_page: Current PDF page for context (optional)
+    history: Earlier turns in this conversation, so a follow-up question can
+      rely on what was already asked and answered (optional)
 
   Returns:
     Dict with answer, citations, and sources
@@ -1312,13 +1331,10 @@ def answer_document(
 
   if api_key:
     try:
-      from services.llm import answer_from_pages
-      chunk_records = [
-        {"page": hit["page"], "text": hit["text"]}
-        for hit in hits
-      ]
-      llm_answer = answer_from_pages(chunk_records, question)
-      answer = llm_answer
+      from services.llm import answer_with_prompt
+      # One grounded prompt: recent history + retrieved evidence + the question.
+      prompt = build_grounded_user_prompt(question, hits, history=history)
+      answer = answer_with_prompt(prompt)
     except Exception as e:
       answer = best_sentence_answer(question, hits)
   else:
@@ -1379,13 +1395,16 @@ def answer_chat_turn(
   Returns:
     Dict with answer, citations, sources (same shape as answer_document)
   """
+  # Read history before appending, so the model sees the earlier turns but not
+  # the one currently being answered.
   result = answer_document(
     document,
     message,
     top_k=top_k,
     candidate_pool=candidate_pool,
     answer_model=answer_model,
-    current_page=current_page
+    current_page=current_page,
+    history=document.get("history")
   )
 
   append_history(document, message, result)

@@ -137,7 +137,8 @@ async def chat(request: ChatRequest):
                 db_session_factory,
                 top_k=3,
                 candidate_pool=60,
-                answer_model="poolside/laguna-s-2.1:free"
+                answer_model="poolside/laguna-s-2.1:free",
+                current_page=request.current_page
             )
         else:
             # Lab C: Use in-memory history
